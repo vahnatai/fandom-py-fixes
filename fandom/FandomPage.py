@@ -213,7 +213,7 @@ class FandomPage(object):
           level_tree[-1]['content'] = section_text
           break
         elif isinstance(next_node, Tag):
-          if next_node.name[0] == 'h':
+          if next_node.name[0] == 'h' and next_node.name[1] != 'r':
             level_tree[-1]['content'] = section_text
             header = next_node.text
             header_level = int(next_node.name[1])
