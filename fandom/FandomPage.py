@@ -4,9 +4,10 @@ import copy
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 from .util import stdout_encode, _wiki_request
+from . import util as u
 
 from fandom.error import (
-  PageError, RedirectError, HTTPTimeoutError, FandomError,
+  PageError, RedirectError, HTTPTimeoutError, FandomError, RequestError,
   ODD_ERROR_MESSAGE)
 
 STANDARD_URL = 'https://{wiki}.fandom.com/{lang}/wiki/{page}'
@@ -133,8 +134,37 @@ class FandomPage(object):
     """
 
     if not getattr(self, '_html', False):
-      request = requests.get(self.url)
-      self._html = request.text
+      headers = {'User-Agent': u.USER_AGENT}
+      # prefer cloudscraper for page fetches to bypass Cloudflare assistance
+      if getattr(u, 'HAVE_CLOUDSCRAPER', False):
+        try:
+          import cloudscraper
+          scraper = cloudscraper.create_scraper()
+          r = scraper.get(self.url, headers=headers)
+        except Exception:
+          r = requests.get(self.url, headers=headers)
+      else:
+        r = requests.get(self.url, headers=headers)
+      text = None
+      try:
+        text = r.text
+      except Exception:
+        text = None
+
+      if text and ("Attention Required" in text or 'cf-browser-verification' in text or 'jschl_vc' in text or 'Cloudflare' in text or 'Just a moment' in text or 'Checking your browser' in text):
+        # Cloudflare challenge served instead of page. Try cloudscraper if available.
+        if getattr(u, 'HAVE_CLOUDSCRAPER', False):
+          try:
+            import cloudscraper
+            scraper = cloudscraper.create_scraper()
+            rr = scraper.get(self.url, headers=headers)
+            text = rr.text
+          except Exception:
+            raise RequestError(self.url, {'_note': 'Cloudflare detected; cloudscraper fallback failed'})
+        else:
+          raise RequestError(self.url, {'_note': 'Cloudflare detected; install cloudscraper to bypass'})
+
+      self._html = text or ''
 
     return self._html
 
@@ -177,6 +207,16 @@ class FandomPage(object):
       soup = BeautifulSoup(html, 'html.parser')
 
       page_content = copy.copy(soup.find('div', class_="mw-parser-output"))
+      # If the main content div wasn't found, try fetching via cloudscraper
+      if page_content is None and getattr(u, 'HAVE_CLOUDSCRAPER', False):
+        try:
+          import cloudscraper
+          scraper = cloudscraper.create_scraper()
+          rr = scraper.get(self.url, headers={'User-Agent': u.USER_AGENT})
+          soup = BeautifulSoup(rr.text, 'html.parser')
+          page_content = copy.copy(soup.find('div', class_="mw-parser-output"))
+        except Exception:
+          page_content = None
 
       infoboxes = page_content.find_all('aside', class_="portable-infobox")
       infobox_content = ""

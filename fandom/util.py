@@ -6,6 +6,13 @@ import time
 import requests
 from datetime import datetime
 
+# Optional Cloudflare bypass helper
+try:
+  import cloudscraper  # type: ignore
+  HAVE_CLOUDSCRAPER = True
+except Exception:
+  HAVE_CLOUDSCRAPER = False
+
 from fandom.error import HTTPTimeoutError, RequestError
 
 API_URL = 'https://{wiki}.fandom.com/{lang}/api.php'
@@ -77,7 +84,16 @@ def _wiki_request(params):
 
   params.pop("wiki")
   params.pop("lang")
-  r = requests.get(api_url, params=params, headers=headers)
+  # Use cloudscraper if available, since some wikis are protected by Cloudflare
+  if HAVE_CLOUDSCRAPER:
+    try:
+      scraper = cloudscraper.create_scraper()
+      r = scraper.get(api_url, params=params, headers=headers)
+    except Exception:
+      # fallback to requests if cloudscraper fails for some reason
+      r = requests.get(api_url, params=params, headers=headers)
+  else:
+    r = requests.get(api_url, params=params, headers=headers)
 
   if RATE_LIMIT:
     RATE_LIMIT_LAST_CALL = datetime.now()
@@ -88,8 +104,29 @@ def _wiki_request(params):
   # If getting the json representation did not work, our data is mangled
   try:
     r = r.json()
-  except:
-    raise RequestError(api_url, params)
+  except Exception:
+    # possible Cloudflare page served instead of JSON
+    text = None
+    try:
+      text = r.text
+    except Exception:
+      pass
+    if text and ("Attention Required" in text or 'cf-browser-verification' in text or 'jschl_vc' in text or 'Cloudflare' in text or 'Just a moment' in text or 'Checking your browser' in text):
+      if HAVE_CLOUDSCRAPER:
+        try:
+          scraper = cloudscraper.create_scraper()  # respects headers, solves CF challenges
+          rr = scraper.get(api_url, params=params, headers=headers)
+          try:
+            r = rr.json()
+          except Exception:
+            raise RequestError(api_url, params)
+        except Exception:
+          raise RequestError(api_url, params)
+      else:
+        # Suggest installing cloudscraper for users behind Cloudflare
+        raise RequestError(api_url, dict(params, _note='Cloudflare detected; install cloudscraper to bypass'))
+    else:
+      raise RequestError(api_url, params)
   # If we got a json response, then we know the format of the input was correct
   if "exception" in r:
     error_code= r['exception'].values()[2]
