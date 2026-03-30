@@ -20,6 +20,7 @@ USER_AGENT = 'fandom (https://github.com/NikolajDanger/fandom-py/)'
 RATE_LIMIT = False
 RATE_LIMIT_MIN_WAIT = None
 RATE_LIMIT_LAST_CALL = None
+_SESSION = None
 
 def debug(fn):
   def wrapper(*args, **kwargs):
@@ -58,6 +59,16 @@ def stdout_encode(u, default='UTF8'):
     return u.encode(encoding).decode(encoding)
   return u.encode(encoding)
 
+def _get_session():
+  """Return a reusable HTTP session, creating it once on first call."""
+  global _SESSION
+  if _SESSION is None:
+    if HAVE_CLOUDSCRAPER:
+      _SESSION = cloudscraper.create_scraper()
+    else:
+      _SESSION = requests.Session()
+  return _SESSION
+
 def _wiki_request(params):
   """
   Make a request to the fandom API using the given search parameters.
@@ -84,15 +95,10 @@ def _wiki_request(params):
 
   params.pop("wiki")
   params.pop("lang")
-  # Use cloudscraper if available, since some wikis are protected by Cloudflare
-  if HAVE_CLOUDSCRAPER:
-    try:
-      scraper = cloudscraper.create_scraper()
-      r = scraper.get(api_url, params=params, headers=headers)
-    except Exception:
-      # fallback to requests if cloudscraper fails for some reason
-      r = requests.get(api_url, params=params, headers=headers)
-  else:
+  session = _get_session()
+  try:
+    r = session.get(api_url, params=params, headers=headers)
+  except Exception:
     r = requests.get(api_url, params=params, headers=headers)
 
   if RATE_LIMIT:
@@ -105,26 +111,15 @@ def _wiki_request(params):
   try:
     r = r.json()
   except Exception:
-    # possible Cloudflare page served instead of JSON
-    text = None
-    try:
-      text = r.text
-    except Exception:
-      pass
-    if text and ("Attention Required" in text or 'cf-browser-verification' in text or 'jschl_vc' in text or 'Cloudflare' in text or 'Just a moment' in text or 'Checking your browser' in text):
-      if HAVE_CLOUDSCRAPER:
-        try:
-          scraper = cloudscraper.create_scraper()  # respects headers, solves CF challenges
-          rr = scraper.get(api_url, params=params, headers=headers)
-          try:
-            r = rr.json()
-          except Exception:
-            raise RequestError(api_url, params)
-        except Exception:
-          raise RequestError(api_url, params)
-      else:
-        # Suggest installing cloudscraper for users behind Cloudflare
+    text = getattr(r, 'text', None)
+    _cf_markers = ("Attention Required", 'cf-browser-verification', 'jschl_vc', 'Cloudflare', 'Just a moment', 'Checking your browser')
+    if text and any(m in text for m in _cf_markers):
+      if not HAVE_CLOUDSCRAPER:
         raise RequestError(api_url, dict(params, _note='Cloudflare detected; install cloudscraper to bypass'))
+      try:
+        r = _get_session().get(api_url, params=params, headers=headers).json()
+      except Exception:
+        raise RequestError(api_url, params)
     else:
       raise RequestError(api_url, params)
   # If we got a json response, then we know the format of the input was correct

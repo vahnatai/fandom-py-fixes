@@ -3,7 +3,7 @@ import requests
 import copy
 from bs4 import BeautifulSoup, NavigableString, Tag
 
-from .util import stdout_encode, _wiki_request
+from .util import stdout_encode, _wiki_request, _get_session
 from . import util as u
 
 from fandom.error import (
@@ -135,34 +135,22 @@ class FandomPage(object):
 
     if not getattr(self, '_html', False):
       headers = {'User-Agent': u.USER_AGENT}
-      # prefer cloudscraper for page fetches to bypass Cloudflare assistance
-      if getattr(u, 'HAVE_CLOUDSCRAPER', False):
-        try:
-          import cloudscraper
-          scraper = cloudscraper.create_scraper()
-          r = scraper.get(self.url, headers=headers)
-        except Exception:
-          r = requests.get(self.url, headers=headers)
-      else:
-        r = requests.get(self.url, headers=headers)
-      text = None
+      session = _get_session()
       try:
+        r = session.get(self.url, headers=headers)
         text = r.text
       except Exception:
-        text = None
+        r = requests.get(self.url, headers=headers)
+        text = r.text
 
-      if text and ("Attention Required" in text or 'cf-browser-verification' in text or 'jschl_vc' in text or 'Cloudflare' in text or 'Just a moment' in text or 'Checking your browser' in text):
-        # Cloudflare challenge served instead of page. Try cloudscraper if available.
-        if getattr(u, 'HAVE_CLOUDSCRAPER', False):
-          try:
-            import cloudscraper
-            scraper = cloudscraper.create_scraper()
-            rr = scraper.get(self.url, headers=headers)
-            text = rr.text
-          except Exception:
-            raise RequestError(self.url, {'_note': 'Cloudflare detected; cloudscraper fallback failed'})
-        else:
+      _cf_markers = ("Attention Required", 'cf-browser-verification', 'jschl_vc', 'Cloudflare', 'Just a moment', 'Checking your browser')
+      if text and any(m in text for m in _cf_markers):
+        if not getattr(u, 'HAVE_CLOUDSCRAPER', False):
           raise RequestError(self.url, {'_note': 'Cloudflare detected; install cloudscraper to bypass'})
+        try:
+          text = session.get(self.url, headers=headers).text
+        except Exception:
+          raise RequestError(self.url, {'_note': 'Cloudflare detected; cloudscraper fallback failed'})
 
       self._html = text or ''
 
@@ -207,16 +195,6 @@ class FandomPage(object):
       soup = BeautifulSoup(html, 'html.parser')
 
       page_content = copy.copy(soup.find('div', class_="mw-parser-output"))
-      # If the main content div wasn't found, try fetching via cloudscraper
-      if page_content is None and getattr(u, 'HAVE_CLOUDSCRAPER', False):
-        try:
-          import cloudscraper
-          scraper = cloudscraper.create_scraper()
-          rr = scraper.get(self.url, headers={'User-Agent': u.USER_AGENT})
-          soup = BeautifulSoup(rr.text, 'html.parser')
-          page_content = copy.copy(soup.find('div', class_="mw-parser-output"))
-        except Exception:
-          page_content = None
 
       infoboxes = page_content.find_all('aside', class_="portable-infobox")
       infobox_content = ""
